@@ -1,66 +1,96 @@
 name: EX / ENV PROD - Deploy Firebase picareprod
 
+# Prod chỉ deploy khi Leader bấm tay (workflow_dispatch). Không auto theo tag push.
+# ref phải là tag vX.Y.Z hoặc nhánh release/vX.Y.Z (cùng một code).
+# Gate: audit-pick 0 UNKNOWN trên nhánh release tương ứng.
+# Environment `production`: bật "Required reviewers" trong Settings → Environments để có thêm
+# một nhịp duyệt trước khi deploy.
+
 on:
   workflow_dispatch:
     inputs:
       release_ref:
-        description: 'Git Tag hoặc Release branch để phát hành lên PROD (ví dụ: v1.2.0 hoặc release/v1.2.0)'
+        description: 'Tag vX.Y.Z hoặc release/vX.Y.Z'
         required: true
-        default: 'v1.2.0'
       skip_audit_gate:
-        description: 'Bỏ qua Audit Pick Gate (CHỈ DÙNG TRONG TRƯỜNG HỢP KHẨN CẤP)'
+        description: 'Bỏ qua Audit Pick Gate (KHẨN CẤP — ghi lý do vào run)'
         required: false
         type: boolean
         default: false
-  push:
-    tags:
-      - 'v*'
+      reason:
+        description: 'Lý do (bắt buộc khi skip_audit_gate)'
+        required: false
+        default: ''
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
 
 jobs:
   audit-gate:
-    name: Audit Pick Gate Check
+    name: Audit Pick Gate
     runs-on: ubuntu-latest
+    outputs:
+      release_branch: ${{ steps.resolve.outputs.release_branch }}
     steps:
-      - name: Checkout Code
+      - name: Validate ref
+        id: resolve
+        env:
+          REF: ${{ inputs.release_ref }}
+          SKIP: ${{ inputs.skip_audit_gate }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]]; then
+            echo "release_branch=release/$REF" >> "$GITHUB_OUTPUT"
+          elif [[ "$REF" =~ ^release/v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]]; then
+            echo "release_branch=$REF" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::release_ref phải là tag vX.Y.Z hoặc release/vX.Y.Z (nhận: '$REF')"
+            exit 1
+          fi
+          if [[ "$SKIP" == "true" && -z "$REASON" ]]; then
+            echo "::error::skip_audit_gate cần reason"
+            exit 1
+          fi
+
+      - name: Checkout (full history for audit)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run Audit Pick Gate
+      - name: Run audit pick
         env:
-          TARGET_REF: ${{ github.event.inputs.release_ref || github.ref_name }}
-          SKIP_GATE: ${{ github.event.inputs.skip_audit_gate }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_BRANCH: ${{ steps.resolve.outputs.release_branch }}
+          SKIP: ${{ inputs.skip_audit_gate }}
+          REASON: ${{ inputs.reason }}
         run: |
-          echo "========================================================"
-          echo "Kiểm tra Audit Pick Gate trước khi phát hành lên PROD..."
-          echo "Target Ref: $TARGET_REF"
-          echo "========================================================"
-
-          # Resolve corresponding release branch
-          if [[ "$TARGET_REF" =~ ^v[0-9]+ ]]; then
-            RELEASE_BRANCH="release/$TARGET_REF"
-          else
-            RELEASE_BRANCH="$TARGET_REF"
-          fi
-
-          # Output markdown report to GitHub Step Summary
-          if [[ "$SKIP_GATE" == "true" ]]; then
-            echo "⚠️ CẢNH BÁO: Leader đã bật chế độ bỏ qua Audit Gate!" >> $GITHUB_STEP_SUMMARY
-            bash scripts/release/audit-pick.sh "$RELEASE_BRANCH" --md >> $GITHUB_STEP_SUMMARY || true
-          else
-            echo "### Báo cáo Audit Pick Gate — Phát hành PROD" >> $GITHUB_STEP_SUMMARY
-            bash scripts/release/audit-pick.sh "$RELEASE_BRANCH" --md | tee -a $GITHUB_STEP_SUMMARY
+          set -o pipefail
+          echo "### Audit Pick Gate — $RELEASE_BRANCH" >> "$GITHUB_STEP_SUMMARY"
+          # Không pipe qua tee: exit code của audit phải là exit code của step.
+          bash scripts/release/audit-pick.sh "$RELEASE_BRANCH" --md > report.md && rc=0 || rc=$?
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          cat report.md
+          if [[ $rc -ne 0 ]]; then
+            if [[ "$SKIP" == "true" ]]; then
+              echo "::warning::Audit gate BLOCKED nhưng bị bỏ qua bởi ${{ github.actor }}: $REASON"
+              echo "> ⚠️ Gate bị bỏ qua bởi @${{ github.actor }}: $REASON" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::Audit gate BLOCKED — còn PR UNKNOWN trên $RELEASE_BRANCH"
+              exit 1
+            fi
           fi
 
   deploy-prod:
     name: Build & Deploy to Firebase Prod
     needs: audit-gate
     runs-on: ubuntu-latest
+    environment: production
     steps:
-      - name: Checkout Target Release Ref
+      - name: Checkout release ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.release_ref || github.ref_name }}
+          ref: ${{ inputs.release_ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -79,7 +109,7 @@ jobs:
 
       - name: Deploy to Firebase Prod (picareprod)
         run: |
-          echo "==> Deploying to Firebase project: picareprod"
+          echo "==> Deploying ${{ inputs.release_ref }} to Firebase project: picareprod"
           # In real environment:
           # npx firebase-tools deploy --project picareprod --token "${{ secrets.FIREBASE_PROD_TOKEN }}"
-          echo "🎉 Successfully deployed release to Firebase project 'picareprod' (EX / ENV PROD)"
+          echo "🎉 Deployed ${{ inputs.release_ref }} to 'picareprod' (EX / ENV PROD)"

@@ -1,261 +1,160 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # PiCare Git Workflow - Audit Pick Gate
-# Usage: bash scripts/release/audit-pick.sh <release-branch> [--md]
+#
+# Liệt kê mọi PR đã merge vào dev kể từ base của nhánh release và xếp vào 3 nhóm:
+#   PICKED   commit đã có trên release (trailer "cherry picked from commit <sha>",
+#            fallback so patch-id bằng `git cherry`) và chưa bị revert
+#   HOLD     PR có nhãn hold:vX.Y.Z (hoặc .git/holds/vX.Y.Z/<pr> khi test offline)
+#   UNKNOWN  còn lại — chưa ai quyết. Có UNKNOWN thì exit 1 (gate chặn tag).
+#
+# Usage:   bash scripts/release/audit-pick.sh <release-branch> [--md]
 # Example: bash scripts/release/audit-pick.sh release/v1.2.0 --md
+#
+# Biến môi trường:
+#   DEV_REF   nhánh tích hợp (mặc định: dev, fallback origin/dev)
 # ==============================================================================
 
-set -eo pipefail
+set -euo pipefail
 
-RELEASE_BRANCH="${1:-}"
+RELEASE_ARG="${1:-}"
 OUTPUT_MODE="${2:-}"
 
-if [[ -z "$RELEASE_BRANCH" ]]; then
-  echo "Error: Release branch argument missing."
-  echo "Usage: $0 <release-branch> [--md]"
-  echo "Example: $0 release/v1.2.0 --md"
-  exit 1
+if [[ -z "$RELEASE_ARG" ]]; then
+  echo "Usage: $0 <release-branch> [--md]" >&2
+  exit 2
 fi
 
-# Ensure git repository
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  echo "Error: Must be run inside a git repository."
-  exit 1
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "Error: not a git repository." >&2; exit 2; }
+
+# Resolve refs: prefer local, fallback origin/
+resolve_ref() {
+  local ref="$1"
+  if git rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then echo "$ref"; return; fi
+  if git rev-parse --verify --quiet "origin/$ref^{commit}" >/dev/null; then echo "origin/$ref"; return; fi
+  return 1
+}
+
+RELEASE_BRANCH="$(resolve_ref "$RELEASE_ARG")" || { echo "Error: branch '$RELEASE_ARG' not found locally or on origin." >&2; exit 2; }
+DEV_BRANCH="$(resolve_ref "${DEV_REF:-dev}")" || { echo "Error: dev branch not found (set DEV_REF)." >&2; exit 2; }
+
+# release/v1.2.0 -> v1.2.0
+RELEASE_VERSION="$(sed -n -E 's#.*release/(v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?)$#\1#p' <<< "$RELEASE_ARG")"
+if [[ -z "$RELEASE_VERSION" ]]; then
+  echo "Error: '$RELEASE_ARG' is not release/vX.Y.Z — cannot derive hold label." >&2
+  exit 2
+fi
+HOLD_LABEL="hold:$RELEASE_VERSION"
+
+MERGE_BASE="$(git merge-base "$RELEASE_BRANCH" "$DEV_BRANCH" 2>/dev/null || true)"
+[[ -n "$MERGE_BASE" ]] || { echo "Error: no merge-base between $RELEASE_BRANCH and $DEV_BRANCH." >&2; exit 2; }
+
+BASE_TAG="$(git describe --tags --abbrev=0 "$MERGE_BASE" 2>/dev/null || git rev-parse --short "$MERGE_BASE")"
+DEV_HEAD_SHORT="$(git rev-parse --short "$DEV_BRANCH")"
+DATE_NOW="$(date "+%Y-%m-%d %H:%M")"
+
+# Hold labels: one gh call for the whole release (no per-PR API call). Empty if gh/network unavailable.
+HOLD_PRS=" "
+if command -v gh >/dev/null 2>&1; then
+  HOLD_PRS=" $( { gh pr list --state merged --label "$HOLD_LABEL" --limit 500 --json number --jq '.[].number' 2>/dev/null || true; } | tr '\n' ' ') "
 fi
 
-# Normalize branch name
-if ! git rev-parse --verify "$RELEASE_BRANCH" >/dev/null 2>&1; then
-  if git rev-parse --verify "origin/$RELEASE_BRANCH" >/dev/null 2>&1; then
-    RELEASE_BRANCH="origin/$RELEASE_BRANCH"
+is_hold() {
+  local pr="$1"
+  [[ "$pr" == "—" ]] && return 1
+  [[ "$HOLD_PRS" == *" $pr "* ]] && return 0
+  [[ -f ".git/holds/${RELEASE_VERSION}/${pr}" ]] && return 0
+  return 1
+}
+
+# Returns 0 if commit is on release (trailer or patch-id) and not reverted afterwards.
+is_picked() {
+  local sha="$1"
+  local picked_sha=""
+  picked_sha="$(git log "$RELEASE_BRANCH" --format=%H --grep="cherry picked from commit $sha" -n 1)"
+  if [[ -n "$picked_sha" ]]; then
+    # reverted on release? (`git revert` writes "This reverts commit <picked sha>")
+    if git log "$RELEASE_BRANCH" --format=%H --grep="This reverts commit $picked_sha" -n 1 | grep -q .; then
+      return 1
+    fi
+    return 0
+  fi
+  # patch-id fallback (pick tay không -x): "- <sha>" = patch tương đương đã có trên release.
+  # git cherry tự loại patch đã bị revert (patch + revert triệt tiêu nhau).
+  git cherry "$RELEASE_BRANCH" "$sha" "$sha^" 2>/dev/null | grep -q "^- $sha"
+}
+
+TOTAL=0; PICKED_COUNT=0; HOLD_COUNT=0; UNKNOWN_COUNT=0
+ROWS=()
+UNKNOWN_PRS=()
+
+while IFS='|' read -r sha subj; do
+  [[ -n "$sha" ]] || continue
+  TOTAL=$((TOTAL + 1))
+
+  # squash-merge subject ends with "(#NNNN)"; anything else is a commit without PR
+  pr="$(sed -n -E 's/.*\(#([0-9]+)\)$/\1/p' <<< "$subj")"
+  [[ -n "$pr" ]] || pr="—"
+
+  type="$(sed -n -E 's/^([a-z]+)(\(.*\))?!?:.*/\1/p' <<< "$subj")"
+  [[ -n "$type" ]] || type="?"
+
+  body="$(git log -1 --format=%b "$sha")"
+  issue="$(sed -n -E 's/.*(close|closes|closed|fix|fixes|fixed|resolve|resolves|issue|ref)[ :]+#([0-9]+).*/\2/Ip' <<< "$body" | head -n 1)"
+  [[ -n "$issue" ]] && issue="#$issue" || issue="—"
+
+  if is_picked "$sha"; then
+    status="PICKED"; PICKED_COUNT=$((PICKED_COUNT + 1))
+  elif is_hold "$pr"; then
+    status="HOLD"; HOLD_COUNT=$((HOLD_COUNT + 1))
   else
-    echo "Error: Branch '$RELEASE_BRANCH' not found locally or on origin."
-    exit 1
-  fi
-fi
-
-# Target dev branch (check local or origin)
-DEV_BRANCH="dev"
-if ! git rev-parse --verify "$DEV_BRANCH" >/dev/null 2>&1; then
-  if git rev-parse --verify "origin/dev" >/dev/null 2>&1; then
-    DEV_BRANCH="origin/dev"
-  else
-    # Fallback to current branch or main if dev doesn't exist yet
-    DEV_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
-  fi
-fi
-
-# Extract version string from release branch name (e.g. release/v1.2.0 -> v1.2.0)
-RELEASE_VERSION=$(echo "$RELEASE_BRANCH" | sed -E 's/.*release\/(v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?).*/\1/')
-if [[ -z "$RELEASE_VERSION" || "$RELEASE_VERSION" == "$RELEASE_BRANCH" ]]; then
-  RELEASE_VERSION="v1.2.0"
-fi
-
-# Find merge base between release branch and dev
-MERGE_BASE=$(git merge-base "$RELEASE_BRANCH" "$DEV_BRANCH" 2>/dev/null || echo "")
-if [[ -z "$MERGE_BASE" ]]; then
-  echo "Error: Could not find merge-base between $RELEASE_BRANCH and $DEV_BRANCH."
-  exit 1
-fi
-
-# Check for nearest tag to merge base for readable label
-BASE_TAG=$(git describe --tags --abbrev=0 "$MERGE_BASE" 2>/dev/null || echo "$MERGE_BASE" | cut -c1-7)
-DEV_HEAD_SHORT=$(git rev-parse --short "$DEV_BRANCH" 2>/dev/null || echo "head")
-DATE_NOW=$(date "+%Y-%m-%d %H:%M")
-
-COMMIT_LIST=()
-while IFS= read -r line || [[ -n "$line" ]]; do
-  [[ -z "$line" ]] && continue
-  COMMIT_LIST+=("$line")
-done < <(git log --reverse --format="%H|%s" "${MERGE_BASE}..${DEV_BRANCH}")
-
-TOTAL_PRS=${#COMMIT_LIST[@]}
-PICKED_COUNT=0
-HOLD_COUNT=0
-UNKNOWN_COUNT=0
-
-declare -a REPORT_ROWS=()
-declare -a UNKNOWN_PRS=()
-
-INDEX=1
-for ENTRY in "${COMMIT_LIST[@]}"; do
-  [[ -z "$ENTRY" ]] && continue
-  COMMIT_HASH="${ENTRY%%|*}"
-  COMMIT_SUBJ="${ENTRY#*|}"
-
-  # Extract PR number if present: #1234 or (#1234)
-  PR_NUM=$(echo "$COMMIT_SUBJ" | sed -n -E 's/.*#([0-9]+).*/\1/p' | head -n 1)
-  if [[ -z "$PR_NUM" ]]; then
-    PR_NUM="$INDEX"
+    status="UNKNOWN"; UNKNOWN_COUNT=$((UNKNOWN_COUNT + 1))
+    UNKNOWN_PRS+=("$([[ "$pr" == "—" ]] && echo "$sha" || echo "$pr")")
   fi
 
-  # Extract Type (feat, fix, chore, docs, refactor, etc.)
-  PR_TYPE=$(echo "$COMMIT_SUBJ" | sed -n -E 's/^([a-zA-Z]+).*/\1/p')
-  if [[ -z "$PR_TYPE" ]]; then
-    PR_TYPE="feat"
-  fi
+  title="$subj"
+  [[ ${#title} -gt 48 ]] && title="${title:0:45}..."
+  label="#$pr"; [[ "$pr" == "—" ]] && label="$(git rev-parse --short "$sha") (no PR)"
+  ROWS+=("$TOTAL|$label $title|$type|$issue|$status")
+done < <(git log --reverse --format='%H|%s' "${MERGE_BASE}..${DEV_BRANCH}")
 
-  # Extract Issue reference if present (e.g. Issue #1234 or fixes #1234)
-  BODY_CONTENT=$(git log -1 --format="%b" "$COMMIT_HASH")
-  ISSUE_NUM=$(echo "$BODY_CONTENT" | sed -n -E 's/.*(fix|fixes|close|closes|issue|ref)[ :]+#([0-9]+).*/\2/Ip' | head -n 1)
-  if [[ -n "$ISSUE_NUM" ]]; then
-    ISSUE_REF="#$ISSUE_NUM"
-  else
-    ISSUE_REF="—"
-  fi
-
-  # Determine Status:
-  # 1. PICKED: check trailer `cherry picked from commit <sha>` on release branch,
-  # or check if commit was backported from release branch, or patch-id match.
-  IS_PICKED=0
-  if git log "$RELEASE_BRANCH" --grep="cherry picked from commit $COMMIT_HASH" --oneline 2>/dev/null | grep -q .; then
-    # Check if later reverted on release
-    if git log "$RELEASE_BRANCH" --grep="Revert .*$COMMIT_HASH" --oneline 2>/dev/null | grep -q . || \
-       git log "$RELEASE_BRANCH" --grep="Revert .*$COMMIT_SUBJ" --oneline 2>/dev/null | grep -q .; then
-      IS_PICKED=0
-    else
-      IS_PICKED=1
-    fi
-  elif git log "$RELEASE_BRANCH" --grep="cherry picked from commit $(echo $COMMIT_HASH | cut -c1-7)" --oneline 2>/dev/null | grep -q .; then
-    if git log "$RELEASE_BRANCH" --grep="Revert .*$COMMIT_SUBJ" --oneline 2>/dev/null | grep -q .; then
-      IS_PICKED=0
-    else
-      IS_PICKED=1
-    fi
-  else
-    # Check if this commit on dev was a backport from release branch
-    BACKPORT_SHA=$(echo "$BODY_CONTENT" | sed -n -E 's/.*cherry picked from commit ([0-9a-f]+).*/\1/p' | head -n 1)
-    if [[ -n "$BACKPORT_SHA" ]]; then
-      if git rev-parse --verify "$BACKPORT_SHA" >/dev/null 2>&1; then
-        if git merge-base --is-ancestor "$BACKPORT_SHA" "$RELEASE_BRANCH" 2>/dev/null; then
-          IS_PICKED=1
-        fi
-      fi
-    fi
-
-    # Fallback to patch-id comparison
-    if [[ $IS_PICKED -eq 0 ]]; then
-      CHERRY_CHECK=$(git cherry "$RELEASE_BRANCH" "$COMMIT_HASH" 2>/dev/null | cut -c1 || echo "+")
-      if [[ "$CHERRY_CHECK" == "-" ]]; then
-        IS_PICKED=1
-      fi
-    fi
-  fi
-
-  # 2. HOLD: Check GitHub PR label `hold:<version>` (or git trailer / local label file)
-  IS_HOLD=0
-  if [[ $IS_PICKED -eq 0 ]]; then
-    EXPECTED_LABEL="hold:$RELEASE_VERSION"
-
-    # Check via gh CLI if PR exists and network available
-    if command -v gh >/dev/null 2>&1 && [[ -n "$PR_NUM" && "$PR_NUM" =~ ^[0-9]+$ ]]; then
-      GH_LABELS=$(gh pr view "$PR_NUM" --json labels --jq '.labels[].name' 2>/dev/null || echo "")
-      if echo "$GH_LABELS" | grep -q "^${EXPECTED_LABEL}$"; then
-        IS_HOLD=1
-      fi
-    fi
-
-    # Fallback: check commit body for `Hold: vX.Y.Z` or `.git/holds/<version>/<pr>`
-    if [[ $IS_HOLD -eq 0 ]]; then
-      if echo "$BODY_CONTENT" | grep -qi "Hold: *$RELEASE_VERSION"; then
-        IS_HOLD=1
-      elif [[ -f ".git/holds/${RELEASE_VERSION}/${PR_NUM}" ]]; then
-        IS_HOLD=1
-      fi
-    fi
-  fi
-
-  STATUS="UNKNOWN"
-  if [[ $IS_PICKED -eq 1 ]]; then
-    STATUS="PICKED"
-    ((PICKED_COUNT++))
-  elif [[ $IS_HOLD -eq 1 ]]; then
-    STATUS="HOLD"
-    ((HOLD_COUNT++))
-  else
-    STATUS="UNKNOWN"
-    ((UNKNOWN_COUNT++))
-    UNKNOWN_PRS+=("$PR_NUM")
-  fi
-
-  # Clean title for display
-  DISPLAY_TITLE="$COMMIT_SUBJ"
-  # Truncate if too long
-  if [[ ${#DISPLAY_TITLE} -gt 36 ]]; then
-    DISPLAY_TITLE="${DISPLAY_TITLE:0:33}..."
-  fi
-
-  REPORT_ROWS+=("$INDEX|#$PR_NUM $DISPLAY_TITLE|$PR_TYPE|$ISSUE_REF|$STATUS")
-  ((INDEX++))
-done
-
-# Format output
 GATE_STATUS="✅ OK to tag"
-if [[ $UNKNOWN_COUNT -gt 0 ]]; then
-  GATE_STATUS="⛔ chưa được tag"
-fi
+[[ $UNKNOWN_COUNT -eq 0 ]] || GATE_STATUS="⛔ chưa được tag"
 
 if [[ "$OUTPUT_MODE" == "--md" ]]; then
-  cat << EOF
-## Release $RELEASE_VERSION — audit pick · $DATE_NOW
-base $BASE_TAG → dev @ $DEV_HEAD_SHORT · $TOTAL_PRS PR · $UNKNOWN_COUNT UNKNOWN $GATE_STATUS
-
-| # | PR | Loại | Issue | Trạng thái |
-|---|---|---|---|---|
-EOF
-
-  for ROW in "${REPORT_ROWS[@]}"; do
-    IFS="|" read -r R_IDX R_PR R_TYPE R_ISSUE R_STATUS <<< "$ROW"
-    printf "| %s | %-34s | %-5s | %-5s | %-10s |\n" "$R_IDX" "$R_PR" "$R_TYPE" "$R_ISSUE" "$R_STATUS"
+  echo "## Release $RELEASE_VERSION — audit pick · $DATE_NOW"
+  echo "base \`$BASE_TAG\` → dev @ \`$DEV_HEAD_SHORT\` · $TOTAL PR · $PICKED_COUNT PICKED · $HOLD_COUNT HOLD · **$UNKNOWN_COUNT UNKNOWN** $GATE_STATUS"
+  echo
+  echo "| # | PR | Loại | Issue | Trạng thái |"
+  echo "|---|---|---|---|---|"
+  for row in "${ROWS[@]}"; do
+    IFS='|' read -r i prcol type issue status <<< "$row"
+    echo "| $i | $prcol | $type | $issue | $status |"
   done
-
-  echo ""
   if [[ $UNKNOWN_COUNT -gt 0 ]]; then
-    PICK_LIST="${UNKNOWN_PRS[*]}"
-    FIRST_UNKNOWN="${UNKNOWN_PRS[0]}"
-    cat << EOF
-pick → bash scripts/release/pick-to-release.sh $RELEASE_BRANCH $PICK_LIST
-hold → gh pr edit $FIRST_UNKNOWN --add-label hold:$RELEASE_VERSION
-EOF
+    echo
+    echo '```'
+    echo "pick → bash scripts/release/pick-to-release.sh $RELEASE_ARG ${UNKNOWN_PRS[*]}"
+    echo "hold → bash scripts/release/hold-pr.sh $RELEASE_VERSION <pr...>"
+    echo '```'
   fi
 else
-  # Terminal colored output
-  RED='\033[0;31m'
-  GREEN='\033[0;32m'
-  YELLOW='\033[0;33m'
-  BLUE='\033[0;34m'
-  BOLD='\033[1m'
-  NC='\033[0m'
-
-  echo -e "${BOLD}========================================================================${NC}"
-  echo -e "${BOLD}PiCare Audit Pick Report — Release $RELEASE_VERSION${NC} ($DATE_NOW)"
-  echo -e "base: $BASE_TAG → dev @ $DEV_HEAD_SHORT | Total: $TOTAL_PRS PR | UNKNOWN: $UNKNOWN_COUNT"
-  echo -e "${BOLD}========================================================================${NC}"
-  printf "%-3s %-40s %-8s %-8s %-10s\n" "#" "PR" "Loại" "Issue" "Trạng thái"
-  echo "------------------------------------------------------------------------"
-
-  for ROW in "${REPORT_ROWS[@]}"; do
-    IFS="|" read -r R_IDX R_PR R_TYPE R_ISSUE R_STATUS <<< "$ROW"
-    COLOR="$RED"
-    if [[ "$R_STATUS" == "PICKED" ]]; then COLOR="$GREEN"; fi
-    if [[ "$R_STATUS" == "HOLD" ]]; then COLOR="$YELLOW"; fi
-
-    printf "%-3s %-40s %-8s %-8s ${COLOR}%-10s${NC}\n" "$R_IDX" "$R_PR" "$R_TYPE" "$R_ISSUE" "$R_STATUS"
+  RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; BOLD=$'\033[1m'; NC=$'\033[0m'
+  echo "${BOLD}Audit pick — $RELEASE_VERSION${NC} ($DATE_NOW)  base $BASE_TAG → dev @ $DEV_HEAD_SHORT"
+  echo "$TOTAL PR · $PICKED_COUNT PICKED · $HOLD_COUNT HOLD · $UNKNOWN_COUNT UNKNOWN"
+  printf '%-3s %-56s %-8s %-7s %s\n' '#' 'PR' 'Loại' 'Issue' 'Trạng thái'
+  for row in "${ROWS[@]}"; do
+    IFS='|' read -r i prcol type issue status <<< "$row"
+    color="$RED"; [[ "$status" == PICKED ]] && color="$GREEN"; [[ "$status" == HOLD ]] && color="$YELLOW"
+    printf '%-3s %-56s %-8s %-7s %s%s%s\n' "$i" "$prcol" "$type" "$issue" "$color" "$status" "$NC"
   done
-
-  echo "------------------------------------------------------------------------"
   if [[ $UNKNOWN_COUNT -gt 0 ]]; then
-    echo -e "${RED}${BOLD}Gate check FAILED ($GATE_STATUS)${NC}: Không được tag khi còn $UNKNOWN_COUNT PR UNKNOWN."
-    echo -e "Để xử lý:"
-    echo -e "  - Pick lên release : bash scripts/release/pick-to-release.sh $RELEASE_BRANCH ${UNKNOWN_PRS[*]}"
-    echo -e "  - Tạm hoãn sang đợt sau: gh pr edit <pr#> --add-label hold:$RELEASE_VERSION"
+    echo "${RED}${BOLD}GATE BLOCKED${NC} — $UNKNOWN_COUNT PR UNKNOWN, không được tag."
+    echo "  pick → bash scripts/release/pick-to-release.sh $RELEASE_ARG ${UNKNOWN_PRS[*]}"
+    echo "  hold → bash scripts/release/hold-pr.sh $RELEASE_VERSION <pr...>"
   else
-    echo -e "${GREEN}${BOLD}Gate check PASSED ($GATE_STATUS)${NC}: Tất cả PR đã PICKED hoặc HOLD."
+    echo "${GREEN}${BOLD}GATE PASSED${NC} — mọi PR đã PICKED hoặc HOLD."
   fi
 fi
 
-# Exit code: 1 if UNKNOWN > 0, 0 if clean
-if [[ $UNKNOWN_COUNT -gt 0 ]]; then
-  exit 1
-else
-  exit 0
-fi
+[[ $UNKNOWN_COUNT -eq 0 ]]
