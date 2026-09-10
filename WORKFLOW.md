@@ -51,7 +51,7 @@ flowchart TD
 |---|---|---|---|---|
 | **01 / DEV** | `picitydev` | `dev` | CI tự động khi push/merge | Phát triển tính năng liên tục, test nội bộ Dev |
 | **STAGING** | `picarestg` | `release/vX.Y.Z` | CI tự động khi push | QC kiểm thử toàn diện đợt phát hành, UAT |
-| **PROD** | `picareprod` | Tag `vX.Y.Z` / Release branch | Leader kích hoạt (Manual Dispatch) | Triển khai chính thức cho người dùng cuối |
+| **PROD** | `picareprod` | Tag `vX.Y.Z` / Release branch | **Chỉ** Leader kích hoạt (Manual Dispatch, environment `production` có thể bật Required reviewers). Không auto theo tag push. | Triển khai chính thức cho người dùng cuối |
 
 ---
 
@@ -102,7 +102,7 @@ $$\text{Range} = \text{merge-base}(\text{release}, \text{dev})\dots\text{dev}$$
 | Trạng thái | Điều kiện nhận diện | Xử lý |
 |---|---|---|
 | **PICKED** | Có trailer `(cherry picked from commit <sha>)` trên nhánh release, hoặc patch tương đương qua `git cherry`. | Đã an toàn, không cần làm gì. |
-| **HOLD** | PR có gắn nhãn GitHub `hold:vX.Y.Z` (sang đợt sau tự trở thành UNKNOWN buộc phải duyệt lại). | Tạm hoãn, không cần làm gì trong đợt này. |
+| **HOLD** | PR có gắn nhãn GitHub `hold:vX.Y.Z` (gắn bằng `scripts/release/hold-pr.sh`; sang đợt sau tự trở thành UNKNOWN buộc phải duyệt lại). | Tạm hoãn, không cần làm gì trong đợt này. |
 | **UNKNOWN** | Các PR còn lại (chưa được pick và chưa được gắn hold). | **Chặn Release!** Leader phải pick hoặc gắn hold. |
 
 ### 5.3. Quy tắc mặc định khi duyệt PR
@@ -132,19 +132,24 @@ bash scripts/release/audit-pick.sh release/v1.2.0 --md
 
 ### Pick PR vào release:
 ```bash
-# Hỗ trợ nhận PR number hoặc commit SHA
+# Nhận PR number hoặc commit SHA. Chặn PR chưa merge dev, bỏ qua PR đã pick,
+# tự sắp theo thứ tự merge trên dev. KHÔNG push — xem lại rồi git push.
 bash scripts/release/pick-to-release.sh release/v1.2.0 3892 3916 3940
+git push origin release/v1.2.0
 ```
 
 ### Hoãn PR sang đợt sau:
 ```bash
-gh pr edit 3925 --add-label hold:v1.2.0
+# Tạo nhãn hold:v1.2.0 nếu chưa có rồi gắn lên PR
+bash scripts/release/hold-pr.sh v1.2.0 3925
 ```
 
 ### Đóng Tag phát hành (Có tự động kiểm tra Audit Gate):
 ```bash
-# Sẽ báo lỗi và từ chối tag nếu còn PR UNKNOWN!
+# Từ chối nếu còn PR UNKNOWN hoặc nhánh release local chưa push (khác origin).
 bash scripts/release/tag-release.sh release/v1.2.0 "Release v1.2.0"
+git push origin v1.2.0
+# rồi Leader chạy workflow "EX / ENV PROD" với release_ref = v1.2.0
 ```
 
 ### Tạo nhánh Hotfix từ tag prod:
@@ -152,7 +157,8 @@ bash scripts/release/tag-release.sh release/v1.2.0 "Release v1.2.0"
 bash scripts/release/create-hotfix.sh fix-auth-login v1.2.0
 ```
 
-### Chạy kịch bản mô phỏng toàn diện:
+### Chạy kịch bản mô phỏng toàn diện / test matrix:
 ```bash
-npm run demo:simulate
+npm run demo:simulate    # walkthrough có giải thích
+npm run test:workflow    # 10 test case có assertion (exit 1 nếu sai)
 ```
