@@ -48,9 +48,14 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/parking/calculate') {
     const type = (url.searchParams.get('type') || 'car_standard') as any;
     const hours = parseFloat(url.searchParams.get('hours') || '2');
-    const fee = calculateParkingFee(type, hours);
-    res.writeHead(200);
-    res.end(JSON.stringify({ type, hours, feeVND: fee }));
+    try {
+      const fee = calculateParkingFee(type, hours);
+      res.writeHead(200);
+      res.end(JSON.stringify({ type, hours, feeVND: fee }));
+    } catch (err: any) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: err.message || 'Bad Request' }));
+    }
     return;
   }
 
