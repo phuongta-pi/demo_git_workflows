@@ -31,3 +31,6 @@ jobs:
 
       - name: Run Tests
         run: npm test
+
+      - name: Release scripts test matrix
+        run: bash scripts/test-workflow-cases.sh

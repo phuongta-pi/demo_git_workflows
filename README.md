@@ -58,6 +58,7 @@ demo_git_workflows/
 │   │   ├── pick-to-release.sh     # Cherry-pick PR vào release với trailer -x
 │   │   ├── cut-release.sh         # Cắt release branch (Lần 1: dev, Lần 2+: tag prod)
 │   │   ├── tag-release.sh         # Kiểm tra Gate & đóng tag vX.Y.Z
+│   │   ├── hold-pr.sh             # Gắn nhãn hold:vX.Y.Z (tạo nhãn nếu chưa có)
 │   │   └── create-hotfix.sh       # Tạo nhánh hotfix từ tag prod
 │   └── demo-simulation.sh         # Script kịch bản mô phỏng End-to-End
 ├── WORKFLOW.md                    # Tài liệu đặc tả quy trình chi tiết

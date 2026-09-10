@@ -12,10 +12,10 @@
 # ==============================================================================
 
 set -eo pipefail
+export NO_FETCH=1
 
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
 RED='\033[0;31m'
 BOLD='\033[1m'
 NC='\033[0m'
@@ -129,7 +129,7 @@ bash scripts/release/pick-to-release.sh release/v1.2.0 3892 3916 3931 3940
 # Mark hold for #3925
 mkdir -p .git/holds/v1.2.0
 touch .git/holds/v1.2.0/3925
-echo "  ✓ Đã gắn nhãn hold:v1.2.0 cho PR #3925 (Tương đương: gh pr edit 3925 --add-label hold:v1.2.0)"
+echo "  ✓ Đã gắn nhãn hold:v1.2.0 cho PR #3925 (thật: bash scripts/release/hold-pr.sh v1.2.0 3925)"
 
 # Step 6: Run Audit Pick Again (Expected to PASS)
 echo -e "\n${BOLD}[Bước 6] Leader chạy lại Audit Pick Gate:${NC}"
