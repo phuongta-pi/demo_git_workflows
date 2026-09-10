@@ -4,6 +4,7 @@ import { AppCheckService } from './modules/auth/appCheck.js';
 import { calculateParkingFee, PARKING_RATES } from './modules/parking/rates.js';
 import { calculateMaintenanceFee } from './modules/fee/calculation.js';
 import { ResidentFilterManager } from './modules/admin/filter.js';
+import { calculateFacilityBookingFee, FACILITY_RATES } from './modules/facility/booking.js';
 
 const config = getConfig();
 const appCheck = new AppCheckService(config.enforceAppCheck);
@@ -63,6 +64,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/facility/rates') {
+    res.writeHead(200);
+    res.end(JSON.stringify(FACILITY_RATES));
+    return;
+  }
+
+  if (url.pathname === '/api/facility/calculate') {
+    const facilityType = (url.searchParams.get('type') || 'bbq_area') as any;
+    const hours = parseFloat(url.searchParams.get('hours') || '2');
+    const isPeakHour = url.searchParams.get('peak') === 'true';
+    const isVipMember = url.searchParams.get('vip') === 'true';
+    const fee = calculateFacilityBookingFee({ facilityType, hours, isPeakHour, isVipMember });
+    res.writeHead(200);
+    res.end(JSON.stringify({ facilityType, hours, isPeakHour, isVipMember, feeVND: fee }));
+    return;
+  }
+
   res.writeHead(404);
   res.end(JSON.stringify({ error: 'Not Found' }));
 });
@@ -73,4 +91,4 @@ if (process.env.NODE_ENV !== 'test') {
   });
 }
 
-export { server, appCheck, filterManager };
+export { server, appCheck, filterManager, calculateFacilityBookingFee, FACILITY_RATES };
