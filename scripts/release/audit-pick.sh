@@ -116,7 +116,7 @@ while IFS='|' read -r sha subj; do
   [[ ${#title} -gt 48 ]] && title="${title:0:45}..."
   label="#$pr"; [[ "$pr" == "—" ]] && label="$(git rev-parse --short "$sha") (no PR)"
   ROWS+=("$TOTAL|$label $title|$type|$issue|$status")
-done < <(git log --reverse --format='%H|%s' "${MERGE_BASE}..${DEV_BRANCH}")
+done < <(git log --reverse --no-merges --format='%H|%s' "${MERGE_BASE}..${DEV_BRANCH}")
 
 GATE_STATUS="✅ OK to tag"
 [[ $UNKNOWN_COUNT -eq 0 ]] || GATE_STATUS="⛔ chưa được tag"
