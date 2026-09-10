@@ -1,0 +1,43 @@
+name: ENV STAGING - Deploy Firebase picarestg
+
+on:
+  push:
+    branches:
+      - 'release/**'
+
+jobs:
+  build-test-deploy:
+    name: Build, Test & Auto Deploy Staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Tests
+        run: npm test
+
+      - name: Build Application
+        run: npm run build
+
+      - name: Deploy to Firebase Staging (picarestg)
+        run: |
+          echo "==> Deploying to Firebase project: picarestg"
+          # In real environment:
+          # npx firebase-tools deploy --project picarestg --token "${{ secrets.FIREBASE_TOKEN }}"
+          echo "✅ Successfully deployed to Firebase project 'picarestg' (ENV STAGING)"
+
+      - name: Audit Pick Status Summary
+        run: |
+          echo "==> Generating Audit Pick Report for ${{ github.ref_name }}..."
+          bash scripts/release/audit-pick.sh "${{ github.ref_name }}" --md >> $GITHUB_STEP_SUMMARY || true

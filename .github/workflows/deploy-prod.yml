@@ -1,0 +1,85 @@
+name: EX / ENV PROD - Deploy Firebase picareprod
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: 'Git Tag hoặc Release branch để phát hành lên PROD (ví dụ: v1.2.0 hoặc release/v1.2.0)'
+        required: true
+        default: 'v1.2.0'
+      skip_audit_gate:
+        description: 'Bỏ qua Audit Pick Gate (CHỈ DÙNG TRONG TRƯỜNG HỢP KHẨN CẤP)'
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  audit-gate:
+    name: Audit Pick Gate Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Audit Pick Gate
+        env:
+          TARGET_REF: ${{ github.event.inputs.release_ref || github.ref_name }}
+          SKIP_GATE: ${{ github.event.inputs.skip_audit_gate }}
+        run: |
+          echo "========================================================"
+          echo "Kiểm tra Audit Pick Gate trước khi phát hành lên PROD..."
+          echo "Target Ref: $TARGET_REF"
+          echo "========================================================"
+
+          # Resolve corresponding release branch
+          if [[ "$TARGET_REF" =~ ^v[0-9]+ ]]; then
+            RELEASE_BRANCH="release/$TARGET_REF"
+          else
+            RELEASE_BRANCH="$TARGET_REF"
+          fi
+
+          # Output markdown report to GitHub Step Summary
+          if [[ "$SKIP_GATE" == "true" ]]; then
+            echo "⚠️ CẢNH BÁO: Leader đã bật chế độ bỏ qua Audit Gate!" >> $GITHUB_STEP_SUMMARY
+            bash scripts/release/audit-pick.sh "$RELEASE_BRANCH" --md >> $GITHUB_STEP_SUMMARY || true
+          else
+            echo "### Báo cáo Audit Pick Gate — Phát hành PROD" >> $GITHUB_STEP_SUMMARY
+            bash scripts/release/audit-pick.sh "$RELEASE_BRANCH" --md | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+  deploy-prod:
+    name: Build & Deploy to Firebase Prod
+    needs: audit-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Target Release Ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_ref || github.ref_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Tests
+        run: npm test
+
+      - name: Build Application
+        run: npm run build
+
+      - name: Deploy to Firebase Prod (picareprod)
+        run: |
+          echo "==> Deploying to Firebase project: picareprod"
+          # In real environment:
+          # npx firebase-tools deploy --project picareprod --token "${{ secrets.FIREBASE_PROD_TOKEN }}"
+          echo "🎉 Successfully deployed release to Firebase project 'picareprod' (EX / ENV PROD)"

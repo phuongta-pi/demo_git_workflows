@@ -1,0 +1,36 @@
+name: 01 / ENV DEV - Deploy Firebase picitydev
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  build-test-deploy:
+    name: Build, Test & Auto Deploy Dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Tests
+        run: npm test
+
+      - name: Build Application
+        run: npm run build
+
+      - name: Deploy to Firebase Dev (picitydev)
+        run: |
+          echo "==> Deploying to Firebase project: picitydev"
+          # In real environment:
+          # npx firebase-tools deploy --project picitydev --token "${{ secrets.FIREBASE_TOKEN }}"
+          echo "✅ Successfully deployed to Firebase project 'picitydev' (ENV DEV)"

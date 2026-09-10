@@ -1,0 +1,9 @@
+{
+  "projects": {
+    "default": "picitydev",
+    "dev": "picitydev",
+    "staging": "picarestg",
+    "prod": "picareprod"
+  },
+  "targets": {}
+}

@@ -1,0 +1,38 @@
+name: Audit Pick On-Demand
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: 'Release branch cần audit (ví dụ: release/v1.2.0)'
+        required: true
+        default: 'release/v1.2.0'
+      issue_number:
+        description: 'Số hiệu Issue tracking đợt release để cập nhật body (tùy chọn)'
+        required: false
+        default: ''
+
+jobs:
+  audit:
+    name: Run Audit Pick
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Audit Pick Script
+        env:
+          RELEASE_BRANCH: ${{ github.event.inputs.release_branch }}
+          ISSUE_NUM: ${{ github.event.inputs.issue_number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "==> Đang chạy audit pick cho $RELEASE_BRANCH..."
+          bash scripts/release/audit-pick.sh "$RELEASE_BRANCH" --md > report.md || true
+          cat report.md >> $GITHUB_STEP_SUMMARY
+
+          if [[ -n "$ISSUE_NUM" ]]; then
+            echo "==> Đang cập nhật Issue #$ISSUE_NUM với nội dung report.md..."
+            gh issue edit "$ISSUE_NUM" --body-file report.md || echo "Không thể cập nhật Issue #$ISSUE_NUM"
+          fi
