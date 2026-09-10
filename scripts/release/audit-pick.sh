@@ -104,18 +104,40 @@ for ENTRY in "${COMMIT_LIST[@]}"; do
   fi
 
   # Determine Status:
-  # 1. PICKED: check trailer `cherry picked from commit <sha>` on release branch
-  # or patch equivalence via git cherry
+  # 1. PICKED: check trailer `cherry picked from commit <sha>` on release branch,
+  # or check if commit was backported from release branch, or patch-id match.
   IS_PICKED=0
-  if git log "$RELEASE_BRANCH" --grep="cherry picked from commit $COMMIT_HASH" --oneline | grep -q .; then
-    IS_PICKED=1
-  elif git log "$RELEASE_BRANCH" --grep="cherry picked from commit $(echo $COMMIT_HASH | cut -c1-7)" --oneline | grep -q .; then
-    IS_PICKED=1
-  else
-    # Fallback to git cherry patch comparison
-    CHERRY_CHECK=$(git cherry "$RELEASE_BRANCH" "$COMMIT_HASH" 2>/dev/null | cut -c1 || echo "+")
-    if [[ "$CHERRY_CHECK" == "-" ]]; then
+  if git log "$RELEASE_BRANCH" --grep="cherry picked from commit $COMMIT_HASH" --oneline 2>/dev/null | grep -q .; then
+    # Check if later reverted on release
+    if git log "$RELEASE_BRANCH" --grep="Revert .*$COMMIT_HASH" --oneline 2>/dev/null | grep -q . || \
+       git log "$RELEASE_BRANCH" --grep="Revert .*$COMMIT_SUBJ" --oneline 2>/dev/null | grep -q .; then
+      IS_PICKED=0
+    else
       IS_PICKED=1
+    fi
+  elif git log "$RELEASE_BRANCH" --grep="cherry picked from commit $(echo $COMMIT_HASH | cut -c1-7)" --oneline 2>/dev/null | grep -q .; then
+    if git log "$RELEASE_BRANCH" --grep="Revert .*$COMMIT_SUBJ" --oneline 2>/dev/null | grep -q .; then
+      IS_PICKED=0
+    else
+      IS_PICKED=1
+    fi
+  else
+    # Check if this commit on dev was a backport from release branch
+    BACKPORT_SHA=$(echo "$BODY_CONTENT" | sed -n -E 's/.*cherry picked from commit ([0-9a-f]+).*/\1/p' | head -n 1)
+    if [[ -n "$BACKPORT_SHA" ]]; then
+      if git rev-parse --verify "$BACKPORT_SHA" >/dev/null 2>&1; then
+        if git merge-base --is-ancestor "$BACKPORT_SHA" "$RELEASE_BRANCH" 2>/dev/null; then
+          IS_PICKED=1
+        fi
+      fi
+    fi
+
+    # Fallback to patch-id comparison
+    if [[ $IS_PICKED -eq 0 ]]; then
+      CHERRY_CHECK=$(git cherry "$RELEASE_BRANCH" "$COMMIT_HASH" 2>/dev/null | cut -c1 || echo "+")
+      if [[ "$CHERRY_CHECK" == "-" ]]; then
+        IS_PICKED=1
+      fi
     fi
   fi
 
