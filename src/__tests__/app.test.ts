@@ -4,6 +4,7 @@ import { AppCheckService } from '../modules/auth/appCheck.js';
 import { calculateParkingFee, PARKING_RATES } from '../modules/parking/rates.js';
 import { calculateMaintenanceFee } from '../modules/fee/calculation.js';
 import { ResidentFilterManager } from '../modules/admin/filter.js';
+import { calculateFacilityBookingFee } from '../modules/facility/booking.js';
 
 test('AppCheckService enforces tokens when enabled', () => {
   const serviceEnforced = new AppCheckService(true);
@@ -51,4 +52,33 @@ test('ResidentFilterManager retains existing filter state', () => {
 
   assert.strictEqual(updated.buildingBlock, 'Tower A');
   assert.strictEqual(updated.floor, 12);
+});
+
+test('Facility booking fee calculates correct base, peak surcharge, and VIP discount', () => {
+  // BBQ Area: 100,000 / hour, max 4h
+  const bbqFee = calculateFacilityBookingFee({ facilityType: 'bbq_area', hours: 2 });
+  assert.strictEqual(bbqFee, 200000);
+
+  // BBQ Area capped at max 4h
+  const bbqCapped = calculateFacilityBookingFee({ facilityType: 'bbq_area', hours: 6 });
+  assert.strictEqual(bbqCapped, 400000);
+
+  // Tennis Court: 80,000 / h, peak multiplier 1.2x -> 2h = 160,000 * 1.2 = 192,000
+  const tennisPeak = calculateFacilityBookingFee({
+    facilityType: 'tennis_court',
+    hours: 2,
+    isPeakHour: true,
+  });
+  assert.strictEqual(tennisPeak, 192000);
+
+  // Swimming Pool: 50,000 / h -> 2h = 100,000. VIP gets 15% off = 85,000
+  const poolVip = calculateFacilityBookingFee({
+    facilityType: 'swimming_pool',
+    hours: 2,
+    isVipMember: true,
+  });
+  assert.strictEqual(poolVip, 85000);
+
+  // 0 hours = 0 fee
+  assert.strictEqual(calculateFacilityBookingFee({ facilityType: 'bbq_area', hours: 0 }), 0);
 });
