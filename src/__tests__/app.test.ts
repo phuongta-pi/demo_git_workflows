@@ -27,6 +27,16 @@ test('Parking rate calculator handles hourly and daily cap correctly', () => {
 
   // Monthly pass: free daily
   assert.strictEqual(calculateParkingFee('car_standard', 10, true), 0);
+
+  // Negative or zero hours: returns 0 VND
+  assert.strictEqual(calculateParkingFee('car_standard', 0), 0);
+  assert.strictEqual(calculateParkingFee('car_standard', -3), 0);
+
+  // Invalid vehicle type: throws Error with descriptive message
+  assert.throws(
+    () => calculateParkingFee('spaceship' as any, 2),
+    /Invalid vehicle type: 'spaceship'/
+  );
 });
 
 test('Maintenance fee applies phase 2 multiplier correctly', () => {

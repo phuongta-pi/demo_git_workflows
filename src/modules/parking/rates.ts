@@ -39,7 +39,15 @@ export function calculateParkingFee(
   hasMonthlyPass = false
 ): number {
   if (hasMonthlyPass) return 0;
+  if (isNaN(hours) || hours <= 0) return 0;
+
   const rate = PARKING_RATES[vehicleType];
+  if (!rate) {
+    throw new Error(
+      `Invalid vehicle type: '${vehicleType}'. Supported types: ${Object.keys(PARKING_RATES).join(', ')}`
+    );
+  }
+
   const calculated = Math.ceil(hours) * rate.baseHourlyRateVND;
   const days = Math.floor(hours / 24);
   const remainingHours = hours % 24;
