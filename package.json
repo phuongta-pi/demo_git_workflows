@@ -12,7 +12,8 @@
     "release:cut": "bash scripts/release/cut-release.sh",
     "release:pick": "bash scripts/release/pick-to-release.sh",
     "release:tag": "bash scripts/release/tag-release.sh",
-    "demo:simulate": "bash scripts/demo-simulation.sh"
+    "demo:simulate": "bash scripts/demo-simulation.sh",
+    "test:workflow": "bash scripts/test-workflow-cases.sh"
   },
   "keywords": [
     "git-workflow",
